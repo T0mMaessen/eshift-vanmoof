@@ -1,86 +1,103 @@
+from flask import Flask, render_template, request, jsonify
 from pymodbus.client import ModbusTcpClient, ModbusSerialClient
+
+app = Flask(__name__)
 
 SLAVE_ID = 0x20
 ADDRESS = 0x02
 
-# SERVER_HOST = 'localhost'
-# SERVER_PORT = 5020
-# UNIT_ID = 6
-#
-# client = ModbusTcpClient(
-#     host=SERVER_HOST,
-#     port=SERVER_PORT,
-#     timeout=1
-# )
+# FOR THE TCP VERSION (server simulation)
+SERVER_HOST = 'localhost'
+SERVER_PORT = 5020
 
-
-SERIAL_PORT = '/dev/serial0'  # GPIO seriële poort
-BAUDRATE = 9600
-
-client = ModbusSerialClient(
-    port=SERIAL_PORT,       # Bijvoorbeeld: "/dev/ttyUSB0" of "COM3"
-    baudrate=BAUDRATE,      # Typisch: 9600, 19200, etc.
-    parity='N',             # 'N' voor geen pariteit, 'E' voor even, 'O' voor oneven
-    stopbits=1,             # Typisch 1 of 2
-    bytesize=8,             # Meestal 8
-    timeout=1               # Timeout in seconden
+client = ModbusTcpClient(
+    host=SERVER_HOST,
+    port=SERVER_PORT,
+    timeout=1
 )
+
 
 def getCurrentGear():
     try:
-        print("Verbinden met de e-shifter...")
-
         if client.connect():
-            print("Verbonden")
             response = client.read_holding_registers(address=ADDRESS, count=1, slave=SLAVE_ID)
             if not response.isError():
-                current_gear = response.registers[0]
-                print("Huidige versnelling:", current_gear)
+                return response.registers[0]
             else:
-                print("Fout bij het lezen van de huidige versnelling:", response)
+                return {"error": "Error reading current gear"}
         else:
-            print("Fout bij het verbinden met de e-shifter")
+            return {"error": "Failed to connect to the e-shifter"}
     finally:
         client.close()
-        print("Verbinding verbroken")
 
 
 def shiftGear(gear):
     try:
-        print("Verbinden met de e-shifter...")
-
         if client.connect():
-            print("Verbonden")
-            response = client.write_register(address=ADDRESS, value=gear, slave=ADDRESS)
+            response = client.write_register(address=ADDRESS, value=gear, slave=SLAVE_ID)
             if not response.isError():
-                print("Versnelling gewijzigd naar:", gear)
+                return {"success": f"Gear shifted to {gear}"}
             else:
-                print("Fout bij het schakelen van de versnelling:", response)
+                return {"error": "Error shifting gear"}
         else:
-            print("Fout bij het verbinden met de e-shifter")
+            return {"error": "Failed to connect to the e-shifter"}
     finally:
         client.close()
-        print("Verbinding verbroken")
 
 
-def main():
-    while True:
-        print("1. Huidige versnelling")
-        print("2. Versnelling wijzigen")
-        print("3. Stoppen")
+def testGearSequence():
+    sequence = [1, 2, 3, 2, 1]
+    results = []
 
-        choice = input("Keuze: ")
-
-        if choice == '1':
-            getCurrentGear()
-        elif choice == '2':
-            gear = int(input("Nieuwe versnelling: "))
-            shiftGear(gear)
-        elif choice == '3':
-            break
+    try:
+        if client.connect():
+            for gear in sequence:
+                response = client.write_register(address=ADDRESS, value=gear, slave=SLAVE_ID)
+                if response.isError():
+                    results.append({"gear": gear, "status": "Error", "message": "Failed to shift gear"})
+                else:
+                    check_response = client.read_holding_registers(address=ADDRESS, count=1, slave=SLAVE_ID)
+                    if not check_response.isError() and check_response.registers[0] == gear:
+                        results.append({"gear": gear, "status": "Success"})
+                    else:
+                        results.append({"gear": gear, "status": "Error", "message": "Gear mismatch"})
         else:
-            print("Ongeldige keuze")
+            return {"error": "Failed to connect to the e-shifter"}
+    finally:
+        client.close()
+
+    return results
+
+
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+
+@app.route('/get_gear', methods=['GET'])
+def getGear():
+    result = getCurrentGear()
+    if isinstance(result, dict) and 'error' in result:
+        return jsonify(result), 500
+    return jsonify({"current_gear": result}), 200
+
+
+@app.route('/shift_gear', methods=['POST'])
+def shift():
+    gear = request.json.get('gear')
+    if gear is None or not (0 <= gear <= 3):
+        return jsonify({"error": "Invalid gear value"}), 400
+    result = shiftGear(gear)
+    return jsonify(result), (200 if "success" in result else 500)
+
+
+@app.route('/test_sequence', methods=['POST'])
+def test_sequence():
+    results = testGearSequence()
+    if isinstance(results, dict) and "error" in results:
+        return jsonify(results), 500
+    return jsonify({"results": results}), 200
 
 
 if __name__ == '__main__':
-    main()
+    app.run(debug=True)
